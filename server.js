@@ -86,7 +86,16 @@ app.post("/ingest", async (req, res) => {
     }
 
     await ensureCollection(dim, collection);
-    await ensurePayloadIndexes(collection);
+    try {
+      await ensurePayloadIndexes(collection);
+    } catch (e) {
+      // No bloquear la ingesta por índices de payload
+      console.warn(
+        "[Ingest] ensurePayloadIndexes falló, continuo sin índices:",
+        e?.response?.status,
+        e?.response?.data || e?.message
+      );
+    }
 
     let offset = 0,
       totalIndexed = 0,
