@@ -1,11 +1,27 @@
-node_modules
-.env
-dist
-.DS_Store
-.vscode
-logs
-*.log
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
+pnpm-debug.log*
+coverage/
+dist/
+.build/
+.tmp/
+
+# Env/privado
+.env
+.env.local
+.env.*.local
+
+# PM2 / logs
+*.log
+pm2.log
+pids
+logs
+pnpm-lock.yaml
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
