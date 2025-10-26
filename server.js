@@ -192,7 +192,7 @@ app.post("/ingest", async (req, res) => {
 app.post("/search/hybrid", async (req, res) => {
   try {
     const { q = "", topK = 8, collection = "inventories_v1" } = req.body || {};
-    const { text, filters, maybeSerial } = parseQueryToFilters(q);
+    const { text, textOriginal, filters, maybeSerial } = parseQueryToFilters(q);
 
     // 1) Serial fuzzy path
     if (maybeSerial) {
@@ -220,14 +220,15 @@ app.post("/search/hybrid", async (req, res) => {
     }
 
     // 2) Semantic + 3) Keyword
+
     const [semRows, kwRows] = await Promise.all([
       require("./src/semantic").semanticSearchQdrant({
-        q: text || q,
+        q: textOriginal || q,
         topK,
         collection,
         filters,
       }),
-      keywordSearchMySQL({ q: text || q, limit: topK * 2, filters }),
+      keywordSearchMySQL({ q: textOriginal || q, limit: topK * 2, filters }),
     ]);
 
     // 4) Fusion
