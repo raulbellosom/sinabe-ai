@@ -39,16 +39,15 @@ async function ensurePayloadIndexes(name = "inventories_v1") {
   }
 
   for (const f of fields) {
-    // Variante 1: /index (algunas versiones)
+    // Variante nueva
     let r = await tryCreate("/index", f);
-    if (r.ok || r.status === 409) continue; // 409 = ya existe ⇒ ok
+    if (r.ok || r.status === 409) continue; // 409 = ya existe
 
-    // Si la ruta no existe o no es válida, prueba variante legacy
+    // Variante legacy
     if (r.status === 404 || r.status === 405 || r.status === 400) {
       r = await tryCreate("/indexes/create", f);
       if (r.ok || r.status === 409) continue;
 
-      // Si también falla aquí pero es 404/405 ⇒ la API no soporta crear índices vía HTTP.
       if (r.status === 404 || r.status === 405) {
         console.warn(
           "[Qdrant] Payload index endpoint no disponible (404/405). Continuando sin índices para",
@@ -56,7 +55,6 @@ async function ensurePayloadIndexes(name = "inventories_v1") {
         );
         continue;
       }
-      // Otro error: log y continúa (no bloqueamos la ingesta)
       console.warn(
         "[Qdrant] Error creando índice (legacy):",
         r.status,
@@ -65,7 +63,6 @@ async function ensurePayloadIndexes(name = "inventories_v1") {
       continue;
     }
 
-    // Otro error en /index: lo reportamos y seguimos
     console.warn(
       "[Qdrant] Error creando índice (/index):",
       r.status,
