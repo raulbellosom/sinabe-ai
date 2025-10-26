@@ -77,6 +77,7 @@ app.post("/ingest", async (req, res) => {
       embedConcurrency = DEFAULT_EMBED_CONCURRENCY,
       upsertChunk = DEFAULT_UPSERT_CHUNK,
       maxPages = null,
+      offsetPages = 0, // ← nuevo: para ingerir por tramos
     } = req.body || {};
 
     if (scope !== "inventories") {
@@ -89,7 +90,6 @@ app.post("/ingest", async (req, res) => {
     try {
       await ensurePayloadIndexes(collection);
     } catch (e) {
-      // No bloquear la ingesta por índices de payload
       console.warn(
         "[Ingest] ensurePayloadIndexes falló, continuo sin índices:",
         e?.response?.status,
@@ -97,8 +97,8 @@ app.post("/ingest", async (req, res) => {
       );
     }
 
-    let offset = 0,
-      totalIndexed = 0,
+    let offset = offsetPages * pageSize; // ← nuevo
+    let totalIndexed = 0,
       totalSkipped = 0,
       page = 0;
     const skippedSamples = [];
@@ -110,13 +110,31 @@ app.post("/ingest", async (req, res) => {
            i.serialNumber,
            i.activeNumber,
            i.status,
+           i.comments,
+           i.receptionDate,
+           i.internalFolio,
+           i.createdAt,
+           i.altaDate,
+           i.bajaDate,
            m.name       AS modelName,
            b.name       AS brandName,
-           t.name       AS typeName
+           t.name       AS typeName,
+           inv.code     AS invoiceCode,
+           po.code      AS purchaseOrderCode,
+           cfs.customFieldsText
          FROM Inventory i
          JOIN Model m           ON i.modelId = m.id
          JOIN InventoryBrand b  ON m.brandId = b.id
          JOIN InventoryType t   ON m.typeId = t.id
+         LEFT JOIN Invoice inv  ON inv.id = i.invoiceId
+         LEFT JOIN PurchaseOrder po ON po.id = i.purchaseOrderId
+         LEFT JOIN (
+           SELECT ic.inventoryId,
+                  GROUP_CONCAT(CONCAT(cf.name, ': ', ic.value) SEPARATOR ' | ') AS customFieldsText
+           FROM InventoryCustomField ic
+           JOIN CustomField cf ON cf.id = ic.customFieldId
+           GROUP BY ic.inventoryId
+         ) cfs ON cfs.inventoryId = i.id
          WHERE i.enabled = 1
          ORDER BY i.id
          LIMIT ? OFFSET ?`,
@@ -125,15 +143,30 @@ app.post("/ingest", async (req, res) => {
 
       if (!rows.length) break;
 
+      // Texto rico para embeddings (incluye campos nuevos)
       const texts = rows.map((r) =>
         [
           r.brandName || "n/a",
           r.modelName || "n/a",
           r.typeName || "n/a",
-          r.serialNumber || "n/a",
-          r.activeNumber || "n/a",
-          r.status || "n/a",
-        ].join(" | ")
+          `SN:${r.serialNumber || "n/a"}`,
+          `ACT:${r.activeNumber || "n/a"}`,
+          `STATUS:${r.status || "n/a"}`,
+          r.comments ? `COM:${r.comments}` : null,
+          r.internalFolio ? `FOLIO:${r.internalFolio}` : null,
+          r.receptionDate ? `RECEP:${r.receptionDate}` : null,
+          r.altaDate
+            ? `ALTA:${new Date(r.altaDate).toISOString().slice(0, 10)}`
+            : null,
+          r.bajaDate
+            ? `BAJA:${new Date(r.bajaDate).toISOString().slice(0, 10)}`
+            : null,
+          r.invoiceCode ? `FAC:${r.invoiceCode}` : null,
+          r.purchaseOrderCode ? `OC:${r.purchaseOrderCode}` : null,
+          r.customFieldsText ? `CUST:${r.customFieldsText}` : null,
+        ]
+          .filter(Boolean)
+          .join(" | ")
       );
 
       const results = await embedTextsRobust(texts, {
@@ -142,14 +175,13 @@ app.post("/ingest", async (req, res) => {
         timeoutMs: REQ_TIMEOUT_MS,
       });
 
-      // Construct points for OK embeddings
       const okPoints = [];
       results.forEach((r, i) => {
         if (r.ok) {
           okPoints.push({
             id: rows[i].id,
             vector: r.vec,
-            payload: rows[i],
+            payload: rows[i], // ← payload ya incluye los campos nuevos
           });
         } else {
           totalSkipped++;
@@ -157,7 +189,7 @@ app.post("/ingest", async (req, res) => {
             skippedSamples.push({
               id: rows[i].id,
               error: r.error,
-              text: texts[i].slice(0, 120),
+              text: texts[i].slice(0, 200),
             });
           }
         }

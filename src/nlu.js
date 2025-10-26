@@ -22,11 +22,8 @@ const STATUS_ALIASES = {
 
 function looksLikeSerial(s) {
   const t = (s || "").trim();
-  // 6..20 alfanumérico
-  if (!/^[A-Za-z0-9\-]{6,20}$/.test(t)) return false;
-  // Debe tener al menos 3 dígitos
+  if (!/^[A-Za-z0-9\-]{8,20}$/.test(t)) return false;
   if (!/\d{3,}/.test(t)) return false;
-  // Debe tener al menos 1 letra
   if (!/[A-Za-z]/.test(t)) return false;
   return true;
 }
