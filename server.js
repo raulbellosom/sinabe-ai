@@ -30,7 +30,7 @@ const {
 const { parseQueryToFilters } = require("./src/nlu");
 const { keywordSearchMySQL } = require("./src/keyword");
 const { rrfFuse } = require("./src/fusion");
-const { suggestSerials } = require("./src/fuzzy");
+const { fuzzySerialSuggest, ensureSerialIndex } = require("./src/fuzzy");
 const { rerankWithLLM, generateWithLLM } = require("./src/rerank");
 
 // ---------- Diagnostics ----------
@@ -224,52 +224,96 @@ app.post("/ingest", async (req, res) => {
 app.post("/search/hybrid", async (req, res) => {
   try {
     const { q = "", topK = 8, collection = "inventories_v1" } = req.body || {};
+    // nota: parseQueryToFilters ahora NO mutila el texto; usa textOriginal
     const { text, textOriginal, filters, maybeSerial } = parseQueryToFilters(q);
 
-    // 1) Serial fuzzy path
+    // 1) Serial path (exacto primero, luego fuzzy con heurísticas)
     if (maybeSerial) {
-      const [exactRows] = await pool.query(
+      // exacto por DB
+      const [[exact]] = await pool.query(
         `SELECT i.id, i.serialNumber, i.activeNumber, i.status, i.createdAt,
                 m.name AS modelName, b.name AS brandName, t.name AS typeName
          FROM Inventory i
          JOIN Model m ON i.modelId = m.id
          JOIN InventoryBrand b ON m.brandId = b.id
          JOIN InventoryType t ON m.typeId = t.id
-         WHERE i.enabled=1 AND (i.serialNumber = ? OR i.activeNumber = ?)
+         WHERE i.enabled = 1 AND (i.serialNumber = ? OR i.activeNumber = ?)
          LIMIT 1`,
         [maybeSerial, maybeSerial]
       );
-      if (exactRows.length) {
+
+      if (exact) {
         return res.json({
           mode: "serial-exact",
           q,
-          results: exactRows,
+          results: [exact],
           suggestions: [],
         });
       }
-      const suggestions = await suggestSerials(maybeSerial, { limit: topK });
-      return res.json({ mode: "serial-fuzzy", q, results: [], suggestions });
+
+      // fuzzy con índice en memoria + heurísticas (drop-first/last) + Levenshtein acotado
+      await ensureSerialIndex();
+      const sugg = await fuzzySerialSuggest(maybeSerial, { maxDist: 2, topK });
+
+      if (sugg.length) {
+        // Trae filas completas y ordénalas como las sugerencias
+        const ids = [...new Set(sugg.map((s) => s.id))];
+        const [rows] = await pool.query(
+          `SELECT i.id, i.serialNumber, i.activeNumber, i.status, i.createdAt,
+                  m.name AS modelName, b.name AS brandName, t.name AS typeName
+           FROM Inventory i
+           JOIN Model m ON i.modelId = m.id
+           JOIN InventoryBrand b ON m.brandId = b.id
+           JOIN InventoryType t ON m.typeId = t.id
+           WHERE i.id IN (?)`,
+          [ids]
+        );
+
+        const byId = new Map(rows.map((r) => [String(r.id), r]));
+        const ordered = sugg
+          .map((s) => {
+            const r = byId.get(String(s.id));
+            return r
+              ? {
+                  ...r,
+                  _fuzzy: {
+                    candidate: s.candidate,
+                    dist: s.dist,
+                    reason: s.reason, // p.ej. "drop-first" para tu caso de 'S' extra
+                  },
+                }
+              : null;
+          })
+          .filter(Boolean);
+
+        return res.json({
+          mode: "serial-fuzzy",
+          q,
+          results: [],
+          suggestions: ordered,
+        });
+      }
+      // si no hay sugerencias, caemos a híbrido normal con el texto
     }
 
-    // 2) Semantic + 3) Keyword
-
+    // 2) Semantic (Qdrant) + 3) Keyword (MySQL) en paralelo
+    const semanticQ = textOriginal || q;
     const [semRows, kwRows] = await Promise.all([
       require("./src/semantic").semanticSearchQdrant({
-        q: textOriginal || q,
+        q: semanticQ,
         topK,
         collection,
         filters,
       }),
-      keywordSearchMySQL({ q: textOriginal || q, limit: topK * 2, filters }),
+      keywordSearchMySQL({ q: semanticQ, limit: topK * 2, filters }),
     ]);
 
-    // 4) Fusion
+    // 4) Fusión (RRF) y 5) rerank con LLM (opcional)
     const fused = rrfFuse([semRows, kwRows]).slice(0, topK * 2);
-
-    // 5) LLM rerank
     const reranked = await rerankWithLLM(q, fused, {
       topN: Math.min(fused.length, 12),
     });
+
     res.json({
       mode: "hybrid",
       q,
